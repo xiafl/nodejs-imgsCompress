@@ -446,13 +446,21 @@ function fileUpdate(imgpath, obj) {
 
 let filesList = new Files({
   root: './',
-  include: [
+  // 缩小 root 指定的目录范围
+  include: [ // 两个**表示所有字符 一个*表示除了/和\的其它字符 ?表示一个非 / \ 字符
     '**.jpg', '**.png',  '**.jpeg',
   ],
+  // 排除某些目录或文件
   exclude: [
     './bbb',
   ],
-  resultCallback(type, fullName, stats){ //每确定一个文件或目录时调用
+  /**
+   * 每确定一个文件或目录时调用
+   * @param {String} type - 路径对应的类型 'File' 表示是一个文件 'Dir' 表示是一个目录
+   * @param {String} fullName - 包括文件名及其扩展名的完整路径
+   * @param {Object} stats - 对应文件或目录的状态信息
+   */
+  resultCallback(type, fullName, stats){
     if(type === 'File'){
       fileUpload(fullName); // 自动上传和下载
     }
@@ -460,7 +468,10 @@ let filesList = new Files({
   // ignoreCallback(type, fullName, stats){ //每忽略一个文件或目录时调用
   //   console.warn('忽略了:::::::::::::::::::::', fullName);
   // },
-  filter(type, fullName, stats){  // 过滤器，获取到文件或目录后，再决定是否可以通过
+
+  // 过滤器，获取到文件或目录后，再决定是否可以通过
+  // 返回 true 表示被过滤了(没有验证通过)，返回其它值，表示目录或文件没有被过滤掉(认为需要进行压缩)
+  filter(type, fullName, stats){  
     if(type === 'File'){
       let result = stats.size <= 5200000; // 小于5M
       return !result;
@@ -469,3 +480,4 @@ let filesList = new Files({
 });
 
 filesList.start();  // 开始压缩
+
