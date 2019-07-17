@@ -5,6 +5,7 @@ bbb
 taa
 *.jpg
 *.png
+.localStorage
 
 # local env files
 .env.local

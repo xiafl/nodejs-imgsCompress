@@ -4,18 +4,90 @@ const path = require('path');
 const https = require('https');
 const { URL } = require('url');
 
-colorLog();
+initColorLog();
 
-//******************************* libs *********************************************
-function BToKB(size, dotNum = 0) {
-  return (size / 1000).toFixed(dotNum);
+//*************************************** 模拟 web storage ************************************ */
+/**
+ * 模拟 web storage
+ * 数据存储存在指定的文件中
+ * v1.0.0
+ * 最后修改: 2019.7.17
+ * 创建: 2019.7.17
+ */
+class LocalStorage {
+  /**
+   * @param {*} fileName 
+   * @param {string} storeType - 存储的类型 'file' 表示存储到本地文件中 'cache' 表示存储在内存中
+   */
+  constructor(storeType = 'file', fileName = '.localStorage' ) {
+    this.fileName = fileName;
+    this.storeType = storeType;
+    this.store = this.getStoreObj(this.fileName) || { length: 0};
+  }
+  get length(){
+    return this.store.length;
+  }
+  setItem(name, val) {  //存储一个值
+    if (!(name in this.store)) {
+      this.store.length++;
+    }
+    const oldVal = this.store[name];
+    this.store[name] = val;
+    if (oldVal !== val) {
+      this.addUpdateTime(this.store);
+      this.setToStore(this.fileName, this.store);
+    }
+  }
+  getItem(name) { // 取值
+    return this.store[name];
+  }
+  removeItem(name) { //删除
+    if (name in this.store) {
+      this.store.length--;
+    }
+    delete this.store[name];
+    this.addUpdateTime(this.store);
+    this.setToStore(this.fileName, this.store);
+  }
+  clear() { // 清空
+    this.store = { length: 0};
+    this.addUpdateTime(this.store);
+    this.setToStore(this.fileName, this.store);
+  }
+  key(name){ //返回存储时的索引
+    return 0;
+  }
+
+  addUpdateTime(obj){ // 添加更新时间
+    obj.__lastUpdate = new Date().toLocaleString();
+  }
+
+  getStoreObj(fileName) { //从文件中读取
+    if(this.storeType !== 'file'){
+      return;
+    }
+    let obj;
+    try {
+      let data = fs.readFileSync(fileName); // 同步读取
+      obj = JSON.parse(data.toString());
+    } catch (e) { 
+      // console.error('读取文件错误！', e) 
+    }
+    return obj;
+  }
+  setToStore(fileName, obj = { length: 0 }) {
+    if(this.storeType !== 'file'){
+      return;
+    }
+    // 如果不存在文件，就会新建一个，如果已经存在，就会被覆盖
+    fs.writeFile(fileName, JSON.stringify(obj), function(err){// 异步写入
+        if(err){
+          // console.log('写入文件错误！', err);
+        }
+    }); 
+  }
 }
-function toPercent(num, dotNum = 2) {
-  return (num * 100).toFixed(dotNum) + '%';
-}
-//******************************* libs *********************************************
-
-
+//*************************************** 模拟 web storage ************************************ */
 
 //******************************* 根据规则获取文件或目录 *********************************************
 
@@ -155,16 +227,23 @@ Files.prototype.filterDynic = function (type, fullName, stats, {filter, ignoreCa
 //---------------------- 匹配路径的算法 ----------------------
 
 /**
- * 转换规则的格式
- * /aaa/* /*bbb.mp3
+ * 转换规则的格式, 返回新的规则数组，不改变原数组
+ * @public
  * @param {Array} rulesArr - 规则的原始数组
+ * @param {Object} obj.before - 转换之前 before(val) 
+ *                              返回 false表示忽略本条规则， 返回字符串或正则 表示使用这个值替换原来的值
+ * @param {Object} obj.after - 转换之后 after(newVal, val)
+ *                              返回 false表示忽略本条规则， 返回非空值 表示使用这个值替换原来的值
  * @returns {Array} 转换后的规则数组
+ * @example
+ * 1. formatRules([/aaa\/bb.mp4/ig, 'aaa.mp3', '** /bb.js', '?c.js']);
+ * // => [/aaa\/bb.mp4/ig, 'aaa.mp3', /^[^\n\\\/]*\/bb\.js$/ig, /^[^\n\\\/]c\.js$/ig ]
  */
-function formatRules(rulesArr, {before, after}) {
-  if(!Array.isArray(rulesArr)){
-    return;
-  }
+function formatRules(rulesArr, {before=null, after=null}) {
   let arr = [];
+  if(!Array.isArray(rulesArr)){
+    return arr;
+  }
   rulesArr.forEach(val => {
     let newVal = val;
     
@@ -177,21 +256,8 @@ function formatRules(rulesArr, {before, after}) {
         newVal = result;
       }
     }
-    if ( !(newVal instanceof RegExp) ) { //不处理正则
-      let isReg = false;
-      if (newVal.includes('*')) {
-        isReg = true;
-        newVal = val.replace('**', '[^\\n\\\\\/]*').replace('*', '[^\\n]*')
-      }
-      if (newVal.includes('?')) {
-        isReg = true;
-        newVal = val.replace('?', '[^\\n\\\\\/]*');
-      }
 
-      if (isReg) {
-        newVal = new RegExp(`^${newVal}$`, 'i');
-      }
-    }
+    newVal = specialSignToReg(newVal, 'ig');
     
     if( typeof after === 'function' ){
       let result = after(newVal, val);
@@ -207,11 +273,56 @@ function formatRules(rulesArr, {before, after}) {
 }
 
 /**
+ * 如果字符串中有特殊字符 * ?，则将其转换为正则表达式
+ * 转换的方式为: 
+ * 1. 默认只处理其中的字符串，不会处理正则表达式
+ * 2. 字符串中的两个\*号表示除了/\之外的其它任意个字符 一个\*号表示任意数量的字符
+ * 3. 一个?号表示 除了/\之外的其它单个字符
+ * 4. 只要含有星号或问题，则表示忽略大小写
+ * @public
+ * @param {any} value - 要转换的字符串
+ * @param {boolean} isIgnore - 创建的正则表达式是否忽略大小写
+ * @example
+ * 1. specialSignToReg('*.mp3');
+ * // => /[^\\n]*\.mp3/ig
+ * 
+ * 2. specialSignToReg('aa/bb?c/**.mp3');
+ * // => /aa/bb[^\\n]c\/\.mp3/ig
+ */
+function specialSignToReg(value, mark = ''){
+  if ( typeof value === 'string' ) { //只处理字符串
+    let isReg = false;
+    if (value.includes('*')) {
+      isReg = true;
+      value = value.replace('**', '[^\\n\\\\\/]*').replace('*', '[^\\n]*')
+    }
+    if (value.includes('?')) {
+      isReg = true;
+      value = value.replace('?', '[^\\n\\\\\/]');
+    }
+
+    if (isReg) {
+      value = value.replace('.', '\\.').replace('/', '\\/').replace('\\', '\\\\');
+      value = new RegExp(`^${value}$`, mark ? mark : 'g');
+    }
+  }
+  return value;
+}
+
+/**
  * 测试指定值否在某个规则集中
+ * @public
  * @param {String} testVal  - 要测试的值
  * @param {Array} [rulesArr=null] - 规则数组 
+ *                                  [
+ *                                      {rule: 'aa.js'}, //如果是一个普通对象，则取其rule作为规则
+ *                                      function(){retrun 'aa.js';}, //如果是一个函数，则取其返回值作为规则
+ *                                      'aa.js',    //普通的字符串，使用全等进行比较
+ *                                      /aa\.js/ig, //使用正则进行测试
+ *                                      undefined, //如果是undefined，则表示没有规则，立即通过本项测试
+ *                                  ]
  * @param {String} [type='some'] - 测试的类型 
- *  'some': 只要指定的值满足其中的一条规则就算满足 
+ *  'some': 只要指定的值满足其中的一条规则就算满足, 一旦满足就不再检测其它规则了 
  *  'every':  指定的值必须满足其中所有规则才算满足
  * @returns {Boolean|null} 布尔值表示在或不在，null表示未知
  */
@@ -221,7 +332,7 @@ function isMatchRule(testVal, rulesArr = null, type = 'some') {
   }
   return rulesArr[type](
     val => {
-      if(!val){
+      if(val === undefined){
         return true;
       }else{
         if(typeof val === 'object' && !(val instanceof RegExp) ){
@@ -229,7 +340,7 @@ function isMatchRule(testVal, rulesArr = null, type = 'some') {
         }else if(typeof val === 'function'){
           val = val();
         }
-        if(!val){
+        if(val === undefined){
           return true;
         }
         return val instanceof RegExp ? val.test(testVal) : testVal === val;
@@ -242,7 +353,10 @@ function isMatchRule(testVal, rulesArr = null, type = 'some') {
 
 //---------------------- libs ----------------------
 
-// 获取文件列表
+/**
+ * 获取目录中的文件和文件夹列表
+ * @param {string} folder - 完整的路径(如果是文件，则包含扩展名)
+ */
 function readdir(folder) {
   return new Promise((resolve, reject) => {
     fs.readdir(folder, (err, files) => {
@@ -251,7 +365,10 @@ function readdir(folder) {
   });
 }
 
-//获取文件信息
+/**
+ * 获取文件或目录信息
+ * @param {string} file  - 完整的路径(如果是文件，则包含扩展名)
+ */
 function stat(file) {
   return new Promise((resolve, reject) => {
     fs.stat(file, (err, stats) => {
@@ -260,14 +377,28 @@ function stat(file) {
   });
 }
 
-//判断一个字符串或正则是否是匹配一个文件(不是文件的话就是目录)
+/**
+ * 判断一个字符串或正则是否是匹配一个文件(不是文件的话就是目录)
+ * 注意，结果不一定完全正确，因为'aa.mp3' 也可以是一个文件夹
+ * @param {string|RegExp} val - 要判断的字符串或正则
+ * @returns {boolean} 
+ * @example
+ * 1. isMathFile('.mp3');  // => true
+ * 2. isMathFile(/\.mp3/ig);  // => true
+ * 3. isMathFile(/mp3\/aa/ig);  // => false
+ * 4. isMathFile('aaa/bb/cc');  // => false
+ * 5. isMathFile(/[abc]{2}\.(mp3|js)/);  // => true
+ */
 function isMathFile(val){
   let isFile = false, str = val;
-  if(val instanceof RegExp){
-    str = val.toString().replace(/(^\/)|(\/$)/g, ''); //  "/.*\.jpg/" ==> ".*\.jpg"
+  if(val instanceof RegExp){ // 因为使用正则来匹配文件的方式写法很多，这里只是简单的进行判断
+    // /aa/ig.toString(); ==> "/aa/gi"
+    str = val.toString().replace(/(^\/)|(\/[iIgGmM]{0,3}$)/g, ''); // 去掉头尾的斜杠   "/.*\.jpg/" ==> ".*\.jpg"
+    // 注意，这种判断并不是特别准确
     isFile = /\\\.[^\n\\\/\.]+\$/.test(str);   // 以 \.xxx 这种结尾
+
   }else{
-    isFile = /\.[^\n\\\/\.]+$/.test(str);  // 以 .xxx 这种结尾
+    isFile = /\.[^\n\\\/\.]*\s*$/.test(str);  // 以 .xxx 这种结尾
   }
   return isFile;
 }
@@ -278,28 +409,33 @@ function isMathFile(val){
 
 
 
-//******************************* 在控制台上有颜色的输出 *********************************************
-function colorLog() {
+
+//******************************* 在cmd控制台上有颜色的输出 *********************************************
+function initColorLog() {
   let { log, warn, error } = console;
   console.log = (...agrs) => { colorLog(null, ...agrs) };
   console.warn = (...agrs) => { colorLog('$yellow', ...agrs) };
   console.error = (...agrs) => { colorLog('$red', ...agrs) };
 
   let styles = {
-    'bold': ['\x1B[1m', '\x1B[22m'],
-    'italic': ['\x1B[3m', '\x1B[23m'],
-    'underline': ['\x1B[4m', '\x1B[24m'],
-    'inverse': ['\x1B[7m', '\x1B[27m'],
-    'strikethrough': ['\x1B[9m', '\x1B[29m'],
-    'white': ['\x1B[37m', '\x1B[39m'],
-    'grey': ['\x1B[90m', '\x1B[39m'],
-    'black': ['\x1B[30m', '\x1B[39m'],
-    'blue': ['\x1B[34m', '\x1B[39m'],
-    'cyan': ['\x1B[36m', '\x1B[39m'],
-    'green': ['\x1B[32m', '\x1B[39m'],
-    'magenta': ['\x1B[35m', '\x1B[39m'],
-    'red': ['\x1B[31m', '\x1B[39m'],
-    'yellow': ['\x1B[33m', '\x1B[39m'],
+    'bold': ['\x1B[1m', '\x1B[22m'],          // 粗体字
+    'italic': ['\x1B[3m', '\x1B[23m'],        // 斜体字
+    'underline': ['\x1B[4m', '\x1B[24m'],     // 下划线
+    'inverse': ['\x1B[7m', '\x1B[27m'],       // 切换背景与前景色
+    'strikethrough': ['\x1B[9m', '\x1B[29m'], //删除线
+
+    'black': ['\x1B[30m', '\x1B[39m'], // 黑色
+    'white': ['\x1B[37m', '\x1B[39m'], // 白色
+    'grey': ['\x1B[90m', '\x1B[39m'],  // 灰色
+
+    'red': ['\x1B[31m', '\x1B[39m'],   // 红色
+    'green': ['\x1B[32m', '\x1B[39m'], // 绿色
+    'blue': ['\x1B[34m', '\x1B[39m'],  // 蓝色
+
+    'yellow': ['\x1B[33m', '\x1B[39m'],   // 黄色 =（红）+（绿）
+    'magenta': ['\x1B[35m', '\x1B[39m'],  // 紫红色 洋红色 品红色 =（红）+（蓝）
+    'cyan': ['\x1B[36m', '\x1B[39m'],     // 蓝绿色 青色  = （蓝）+（绿）
+
     'whiteBG': ['\x1B[47m', '\x1B[49m'],
     'greyBG': ['\x1B[49;5;8m', '\x1B[49m'],
     'blackBG': ['\x1B[40m', '\x1B[49m'],
@@ -320,15 +456,24 @@ function colorLog() {
     return new RegExp(`^\\s*${str}(?:\\s*,\\s*${str})*\\s*$`);
   }
 
-  let styleReg = getStyleFlagReg();
+  let styleReg = getStyleFlagReg(); // 例如: /\$(red|green|blue)/
 
+  /**
+   * 插入
+   * @param {Array<String>} regResultArr - 颜色数组 如 : ['red', 'greenBg']
+   * @param {String} str - 要输出的字符串  
+   * @returns {String} 添加颜色后的字符串
+   * @example
+   * 1. insertColorStr(['red', 'greenBg'], '小明');
+   * // => '\x1B[31m \x1B[42m 小明 \x1B[49m \x1B[39m'
+   */
   function insertColorStr(regResultArr, str) {
     if (!regResultArr) {
       return str;
     }
     let markStr = '__inner_20190704171233103__';
     let result = markStr;
-    for (let i = 1, colorName; i < regResultArr.length; i++) {
+    for (let i = 0, colorName; i < regResultArr.length; i++) {
       colorName = regResultArr[i];
       if (styles[colorName]) {
         result = result.replace(markStr, styles[colorName].join(markStr));
@@ -342,12 +487,13 @@ function colorLog() {
     fixedColor = typeof fixedColor == 'string' ? fixedColor.match(styleReg) : null;
     for (let i = 0, val, regResultArr, lastRegResultArr = fixedColor; i < args.length; i++) {
       val = args[i];
+      // regResultArr = ['red', 'greenBG']
       regResultArr = typeof val == 'string' ? val.match(styleReg) : null;
       if (regResultArr) {
         if (fixedColor) {
           regResultArr.forEach(val => {
             if (!fixedColor.includes(val)) {
-              regResultArr.push(val);
+              regResultArr.unshift(val);
             }
           });
         }
@@ -360,7 +506,7 @@ function colorLog() {
     log(...result);
   }
 };
-//******************************* 在控制台上有颜色的输出 *********************************************
+//******************************* 在cmd控制台上有颜色的输出 *********************************************
 
 
 //*******************************业务逻辑 上传和下载 *********************************************
@@ -426,11 +572,14 @@ function fileUpdate(imgpath, obj) {
     res.on('end', function () {
       fs.writeFile(imgpath, body, 'binary', err => {
         if (err) return console.error(err);
-        console.log('$blue, $whiteBG',
+        console.log('$blue',
           `压缩成功 [${imgpath}]，原始大小 ${BToKB(obj.input.size)}KB，压缩后大小 ${
           BToKB(obj.output.size)
-          }KB，压缩比例 ${toPercent(1 - obj.output.ratio, 1)}`
+          }KB，体积减小了 ${toPercent(1 - obj.output.ratio, 1)}`
         );
+        
+        storage.setItem(imgpath, obj.output.size); // 将压缩信息存到本地文件中
+        
       });
     });
   });
@@ -440,11 +589,21 @@ function fileUpdate(imgpath, obj) {
   req.end();
 }
 
+//---------------------- libs ----------------------
+function BToKB(size, dotNum = 0) {
+  return (size / 1000).toFixed(dotNum);
+}
+function toPercent(num, dotNum = 2) {
+  return (num * 100).toFixed(dotNum) + '%';
+}
+//---------------------- libs ----------------------
+
 // module.exports = Files;
 //*******************************业务逻辑  上传和下载 *********************************************
 
+const storage = new LocalStorage();
 
-let filesList = new Files({
+const filesList = new Files({
   root: './',
   // 缩小 root 指定的目录范围
   include: [ // 两个**表示所有字符 一个*表示除了/和\的其它字符 ?表示一个非 / \ 字符
@@ -471,12 +630,22 @@ let filesList = new Files({
 
   // 过滤器，获取到文件或目录后，再决定是否可以通过
   // 返回 true 表示被过滤了(没有验证通过)，返回其它值，表示目录或文件没有被过滤掉(认为需要进行压缩)
-  filter(type, fullName, stats){  
-    if(type === 'File'){
-      let result = stats.size <= 5200000; // 小于5M
-      return !result;
-    }
-  }, 
+  filter: [
+    function(type, fullName, stats){  
+      if(type === 'File'){
+        const size = storage.getItem(fullName);
+        if(size && Math.abs(stats.size - size) < 1000){ // 相差不足1kb，就不压缩
+          return true;
+        }
+      }
+    }, 
+    function(type, fullName, stats){  
+      if(type === 'File'){
+        let result = stats.size <= 5200000; // 小于5M
+        return !result;
+      }
+    }, 
+  ],
 });
 
 filesList.start();  // 开始压缩
